@@ -4,6 +4,8 @@ import sqlite3
 import requests
 from typing import Optional
 
+from RAGFlowSDK.constants import APP_CONFIG_DIR
+
 
 class RAGFlowCli:
     def __init__(self, auth_token: str, base_url: str = "http://172.30.58.252", db_path: str = "documents.db"):
@@ -18,28 +20,30 @@ class RAGFlowCli:
             'Connection': 'keep-alive',
             'Authorization': auth_token,
         }
-        self.db_path = db_path
+        if not os.path.exists(APP_CONFIG_DIR):
+            os.makedirs(APP_CONFIG_DIR)
+        self.db_path = os.path.join(APP_CONFIG_DIR, "documents.db")
         self._init_db()
 
     def _init_db(self):
         """初始化SQLite数据库"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        
+
         # 检查是否需要更新表结构
         c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
         table_exists = c.fetchone() is not None
-        
+
         if table_exists:
             # 获取现有表的列信息
             c.execute('PRAGMA table_info(documents)')
             columns = {row[1] for row in c.fetchall()}
-            
+
             # 如果是旧版表结构，则删除旧表
             if 'update_date' not in columns:
                 c.execute('DROP TABLE documents')
                 table_exists = False
-        
+
         if not table_exists:
             c.execute('''CREATE TABLE documents
                         (doc_id TEXT PRIMARY KEY, 
@@ -56,7 +60,7 @@ class RAGFlowCli:
                          update_date TEXT)      -- 更新时间
                          ''')
             print("数据库表结构已更新")
-        
+
         conn.commit()
         conn.close()
 
@@ -76,19 +80,19 @@ class RAGFlowCli:
                 headers=self.headers,
                 stream=True
             )
-            
+
             if response.status_code == 200:
                 # 创建临时文件
                 temp_path = f"temp_{doc_id}.pdf"
                 sha256_hash = hashlib.sha256()
-                
+
                 # 边下载边计算哈希值
                 with open(temp_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             sha256_hash.update(chunk)
-                
+
                 # 删除临时文件
                 os.remove(temp_path)
                 return sha256_hash.hexdigest()
@@ -100,42 +104,42 @@ class RAGFlowCli:
     def sync(self, kb_id: str):
         """更新本地数据库中的文档信息和哈希值"""
         docs = self.get_all_documents(kb_id)
-        
+
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        
+
         for doc in docs:
             doc_id = doc.get('id')
             # 检查是否需要更新文档信息
             c.execute('SELECT update_date FROM documents WHERE doc_id = ?', (doc_id,))
             result = c.fetchone()
             doc_update_date = doc.get('update_date')
-            
+
             if not result or result[0] != doc_update_date:
                 print(f"正在处理文档: {doc.get('name')}")
                 # 计算文件哈希值（如果需要）
                 file_hash = None
                 if not result:  # 新文档才需要下载计算哈希值
                     file_hash = self._download_and_hash(doc_id)
-                
+
                 if file_hash or result:  # 新文档有哈希值或是更新已有文档
                     c.execute('''INSERT OR REPLACE INTO documents 
                                 (doc_id, kb_id, name, file_hash, create_date,
                                  status, process_msg, process, size, source_type,
                                  chunk_num, update_date)
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                             (doc_id, kb_id, doc.get('name'), 
-                              file_hash if file_hash else result[0],  # 保留原有哈希值
-                              doc.get('create_date'),
-                              str(doc.get('status')),
-                              doc.get('progress_msg'),
-                              str(doc.get('progress', 0)),
-                              doc.get('size'),
-                              doc.get('source_type'),
-                              doc.get('chunk_num'),
-                              doc_update_date))
+                              (doc_id, kb_id, doc.get('name'),
+                               file_hash if file_hash else result[0],  # 保留原有哈希值
+                               doc.get('create_date'),
+                               str(doc.get('status')),
+                               doc.get('progress_msg'),
+                               str(doc.get('progress', 0)),
+                               doc.get('size'),
+                               doc.get('source_type'),
+                               doc.get('chunk_num'),
+                               doc_update_date))
                     conn.commit()
-        
+
         conn.close()
 
     def check_file_exists(self, kb_id: str, file_path: str) -> bool:
@@ -144,14 +148,14 @@ class RAGFlowCli:
         """
         try:
             file_hash = self._calculate_file_hash(file_path)
-            
+
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
             c.execute('SELECT doc_id FROM documents WHERE kb_id = ? AND file_hash = ?',
-                     (kb_id, file_hash))
+                      (kb_id, file_hash))
             result = c.fetchone()
             conn.close()
-            
+
             return result is not None
         except Exception as e:
             print(f"检查文件哈希值时发生错误: {str(e)}")
@@ -207,10 +211,26 @@ class RAGFlowCli:
                 return {"success": False, "message": "文件不存在"}
 
             real_filename = os.path.basename(file_path)
+            file_hash = self._calculate_file_hash(file_path)
 
-            # 检查文件是否已存在
-            if self.check_file_exists(kb_id, real_filename):
-                return {"success": False, "message": "文件已存在，跳过上传"}
+            # 检查文件是否已存在（基于哈希值）
+            conn = sqlite3.connect(self.db_path)
+            c = conn.cursor()
+            c.execute("""
+                SELECT name, doc_id, process 
+                FROM documents 
+                WHERE kb_id = ? AND file_hash = ?
+            """, (kb_id, file_hash))
+            existing_doc = c.fetchone()
+            conn.close()
+
+            if existing_doc:
+                name, doc_id, process = existing_doc
+                process = float(process or 0)
+                return {
+                    "success": False,
+                    "message": f"文件已存在（文件名：{name}，文档ID：{doc_id}，处理进度：{process * 100}%），跳过上传"
+                }
 
             files = {
                 'file': (real_filename, open(file_path, 'rb'), 'application/pdf')
@@ -228,6 +248,8 @@ class RAGFlowCli:
             if response.status_code == 200:
                 result = response.json()
                 if result.get('code') == 9 and result.get('data') is True:
+                    # 上传成功后，立即同步一次数据库以获取新文档信息
+                    self.sync(kb_id)
                     return {"success": True, "message": "文件上传成功"}
                 else:
                     return {"success": False, "message": f"上传失败: {result.get('message')}"}
@@ -246,7 +268,7 @@ class RAGFlowCli:
         """
         if not os.path.exists(directory_path):
             return {"success": False, "message": "目录不存在"}
-
+        self.sync(kb_id)
         stats = {
             "total": 0,
             "success": 0,
@@ -297,10 +319,10 @@ class RAGFlowCli:
         """
         # 首先确保本地数据库是最新的
         self.sync(kb_id)
-        
+
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        
+
         # 查找具有相同哈希值的文档，并按重复数量降序排序
         c.execute('''
             WITH duplicate_counts AS (
@@ -324,25 +346,25 @@ class RAGFlowCli:
             JOIN duplicate_counts dc ON d.file_hash = dc.file_hash
             GROUP BY d.file_hash
         ''', (kb_id,))
-        
+
         duplicates = c.fetchall()
-        
+
         # 获取知识库中的总文档数
         c.execute('SELECT COUNT(*) FROM documents WHERE kb_id = ?', (kb_id,))
         total_docs = c.fetchone()[0]
-        
+
         # 生成报告
         report = []
         report.append(f"知识库文档查重报告")
         report.append(f"总文档数: {total_docs}")
         report.append(f"发现重复文档组数: {len(duplicates)}")
-        
+
         if duplicates:
             report.append("\n重复文档详情:")
             for file_hash, names, doc_ids, dates, statuses, processes, sizes, count in duplicates:
                 report.append(f"\n文件哈希值: {file_hash}")
                 report.append(f"重复数量: {count}")
-                
+
                 # 将组合字符串分割成列表并创建文档信息元组列表
                 doc_infos = []
                 name_list = names.split(',')
@@ -351,7 +373,7 @@ class RAGFlowCli:
                 status_list = statuses.split(',')
                 process_list = processes.split(',')
                 size_list = sizes.split(',')
-                
+
                 for i in range(count):
                     doc_infos.append({
                         'doc_id': doc_id_list[i],
@@ -361,10 +383,10 @@ class RAGFlowCli:
                         'process': float(process_list[i] or 0),  # 处理空值情况
                         'size': int(size_list[i])
                     })
-                
+
                 # 按处理进度降序排序
                 doc_infos.sort(key=lambda x: x['process'], reverse=True)
-                
+
                 report.append("重复实例:")
                 for doc in doc_infos:
                     status_map = {
@@ -373,16 +395,16 @@ class RAGFlowCli:
                         "-1": "处理失败"
                     }
                     status = status_map.get(doc['status'], "未知状态")
-                    
+
                     report.append(f"  - 文档ID: {doc['doc_id']}")
                     report.append(f"    文件名: {doc['name']}")
                     report.append(f"    创建时间: {doc['date']}")
                     report.append(f"    处理状态: {status}")
-                    report.append(f"    处理进度: {doc['process']*100}%")
+                    report.append(f"    处理进度: {doc['process'] * 100}%")
                     report.append(f"    文件大小: {doc['size']:,} 字节")
         else:
             report.append("\n未发现重复文档！")
-        
+
         conn.close()
         return "\n".join(report)
 
@@ -394,7 +416,7 @@ class RAGFlowCli:
         """
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        
+
         c.execute('''
             SELECT file_hash, GROUP_CONCAT(doc_id) as doc_ids
             FROM documents 
@@ -402,14 +424,14 @@ class RAGFlowCli:
             GROUP BY file_hash 
             HAVING COUNT(*) > 1
         ''', (kb_id,))
-        
+
         duplicate_groups = []
         for file_hash, doc_ids in c.fetchall():
             duplicate_groups.append({
                 'hash': file_hash,
                 'doc_ids': doc_ids.split(',')
             })
-        
+
         conn.close()
         return duplicate_groups
 
@@ -427,7 +449,7 @@ class RAGFlowCli:
                     "doc_id": [doc_id]  # 接口要求的格式是文档ID列表
                 }
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
                 if result.get('code') == 0 and result.get('data') is True:
@@ -451,10 +473,10 @@ class RAGFlowCli:
         """
         # 首先确保本地数据库是最新的
         self.sync(kb_id)
-        
+
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        
+
         # 查找重复文档组
         c.execute('''
             WITH duplicate_counts AS (
@@ -473,9 +495,9 @@ class RAGFlowCli:
             JOIN duplicate_counts dc ON d.file_hash = dc.file_hash
             GROUP BY d.file_hash
         ''', (kb_id,))
-        
+
         duplicates = c.fetchall()
-        
+
         # 清理统计
         stats = {
             "total_groups": len(duplicates),
@@ -483,20 +505,20 @@ class RAGFlowCli:
             "failed_deletes": [],
             "details": []
         }
-        
+
         for file_hash, doc_ids, names, processes in duplicates:
             doc_id_list = doc_ids.split(',')
             name_list = names.split(',')
             process_list = [float(p or 0) for p in processes.split(',')]
-            
+
             # 将文档信息组合成列表并按处理进度排序
             docs = list(zip(doc_id_list, name_list, process_list))
             docs.sort(key=lambda x: x[2], reverse=True)  # 按进度降序排序
-            
+
             # 保留进度最高的文档，删除其他的
             kept_doc = docs[0]
             docs_to_delete = docs[1:]
-            
+
             group_detail = {
                 "file_hash": file_hash,
                 "kept_doc": {
@@ -506,7 +528,7 @@ class RAGFlowCli:
                 },
                 "deleted_docs": []
             }
-            
+
             for doc_id, name, progress in docs_to_delete:
                 if self.delete_document(doc_id):
                     stats["total_deleted"] += 1
@@ -524,11 +546,11 @@ class RAGFlowCli:
                         "progress": progress,
                         "status": "失败"
                     })
-            
+
             stats["details"].append(group_detail)
-        
+
         conn.close()
-        
+
         # 生成报告
         report = []
         report.append("重复文档清理报告")
@@ -536,7 +558,7 @@ class RAGFlowCli:
         report.append(f"已删除文档数: {stats['total_deleted']}")
         if stats["failed_deletes"]:
             report.append(f"删除失败数: {len(stats['failed_deletes'])}")
-        
+
         if stats["details"]:
             report.append("\n清理详情:")
             for detail in stats["details"]:
@@ -544,14 +566,14 @@ class RAGFlowCli:
                 report.append("保留的文档:")
                 report.append(f"  - ID: {detail['kept_doc']['id']}")
                 report.append(f"    文件名: {detail['kept_doc']['name']}")
-                report.append(f"    处理进度: {detail['kept_doc']['progress']*100}%")
-                
+                report.append(f"    处理进度: {detail['kept_doc']['progress'] * 100}%")
+
                 if detail["deleted_docs"]:
                     report.append("删除的文档:")
                     for doc in detail["deleted_docs"]:
                         report.append(f"  - ID: {doc['id']}")
                         report.append(f"    文件名: {doc['name']}")
-                        report.append(f"    处理进度: {doc['progress']*100}%")
+                        report.append(f"    处理进度: {doc['progress'] * 100}%")
                         report.append(f"    状态: {doc['status']}")
-        
+
         return "\n".join(report)
