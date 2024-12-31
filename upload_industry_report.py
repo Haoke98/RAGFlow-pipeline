@@ -8,6 +8,7 @@ class IndustryReportUploader:
     def __init__(self):
         self.base_url = "http://172.30.58.252"
         self.upload_url = f"{self.base_url}/v1/document/upload"
+        self.search_url = f"{self.base_url}/v1/document/list"
         self.headers = {
             'Accept': 'application/json',
             'Accept-Language': 'zh-CN',
@@ -15,6 +16,40 @@ class IndustryReportUploader:
             'Connection': 'keep-alive',
             'Authorization': 'IjcxMjA4ZThjYzY1ZjExZWZhMjg4MDI0MmFjMTIwMDAzIg.Z3IVjQ.JdDCLmXjv-77b1vr3AIy06D_xRc',
         }
+
+    def check_file_exists(self, kb_id: str, filename: str) -> bool:
+        """
+        检查文件是否已经存在于知识库中
+        :param kb_id: 知识库ID
+        :param filename: 文件名
+        :return: 是否存在
+        """
+        try:
+            params = {
+                'kb_id': kb_id,
+                'keywords': filename,
+                'page_size': 10,
+                'page': 1
+            }
+            
+            response = requests.get(
+                self.search_url,
+                headers=self.headers,
+                params=params
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('code') == 0:
+                    docs = result.get('data', {}).get('docs', [])
+                    # 检查是否有完全匹配的文件名
+                    for doc in docs:
+                        if doc.get('name') == filename:
+                            return True
+            return False
+        except Exception as e:
+            print(f"检查文件是否存在时发生错误: {str(e)}")
+            return False
 
     def upload_file(self, kb_id: str, file_path: str):
         """
@@ -27,8 +62,11 @@ class IndustryReportUploader:
             if not os.path.exists(file_path):
                 return {"success": False, "message": "文件不存在"}
 
-            # 从文件路径中获取实际的文件名
             real_filename = os.path.basename(file_path)
+            
+            # 检查文件是否已存在
+            if self.check_file_exists(kb_id, real_filename):
+                return {"success": False, "message": "文件已存在，跳过上传"}
 
             files = {
                 'file': (real_filename, open(file_path, 'rb'), 'application/pdf')
