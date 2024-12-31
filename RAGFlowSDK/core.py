@@ -128,8 +128,8 @@ class RAGFlowCli:
                               file_hash if file_hash else result[0],  # 保留原有哈希值
                               doc.get('create_date'),
                               str(doc.get('status')),
-                              doc.get('process_msg'),
-                              str(doc.get('process', 0)),
+                              doc.get('progress_msg'),
+                              str(doc.get('progress', 0)),
                               doc.get('size'),
                               doc.get('source_type'),
                               doc.get('chunk_num'),
@@ -301,20 +301,28 @@ class RAGFlowCli:
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        # 查找具有相同哈希值的文档
+        # 查找具有相同哈希值的文档，并按重复数量降序排序
         c.execute('''
-            SELECT file_hash, 
-                   GROUP_CONCAT(name) as names, 
-                   GROUP_CONCAT(doc_id) as doc_ids,
-                   GROUP_CONCAT(create_date) as dates,
-                   GROUP_CONCAT(status) as statuses,
-                   GROUP_CONCAT(process) as processes,
-                   GROUP_CONCAT(size) as sizes,
-                   COUNT(*) as count
-            FROM documents 
-            WHERE kb_id = ?
-            GROUP BY file_hash 
-            HAVING count > 1
+            WITH duplicate_counts AS (
+                SELECT file_hash, COUNT(*) as count
+                FROM documents 
+                WHERE kb_id = ?
+                GROUP BY file_hash 
+                HAVING count > 1
+                ORDER BY count DESC
+            )
+            SELECT 
+                d.file_hash,
+                GROUP_CONCAT(d.name) as names,
+                GROUP_CONCAT(d.doc_id) as doc_ids,
+                GROUP_CONCAT(d.create_date) as dates,
+                GROUP_CONCAT(d.status) as statuses,
+                GROUP_CONCAT(d.process) as processes,
+                GROUP_CONCAT(d.size) as sizes,
+                dc.count
+            FROM documents d
+            JOIN duplicate_counts dc ON d.file_hash = dc.file_hash
+            GROUP BY d.file_hash
         ''', (kb_id,))
         
         duplicates = c.fetchall()
@@ -335,7 +343,8 @@ class RAGFlowCli:
                 report.append(f"\n文件哈希值: {file_hash}")
                 report.append(f"重复数量: {count}")
                 
-                # 将组合字符串分割成列表
+                # 将组合字符串分割成列表并创建文档信息元组列表
+                doc_infos = []
                 name_list = names.split(',')
                 doc_id_list = doc_ids.split(',')
                 date_list = dates.split(',')
@@ -343,23 +352,34 @@ class RAGFlowCli:
                 process_list = processes.split(',')
                 size_list = sizes.split(',')
                 
-                report.append("重复实例:")
                 for i in range(count):
+                    doc_infos.append({
+                        'doc_id': doc_id_list[i],
+                        'name': name_list[i],
+                        'date': date_list[i],
+                        'status': status_list[i],
+                        'process': float(process_list[i] or 0),  # 处理空值情况
+                        'size': int(size_list[i])
+                    })
+                
+                # 按处理进度降序排序
+                doc_infos.sort(key=lambda x: x['process'], reverse=True)
+                
+                report.append("重复实例:")
+                for doc in doc_infos:
                     status_map = {
                         "0": "待处理",
                         "1": "处理完成",
                         "-1": "处理失败"
                     }
-                    status = status_map.get(status_list[i], "未知状态")
-                    process = process_list[i]
-                    size = size_list[i]
+                    status = status_map.get(doc['status'], "未知状态")
                     
-                    report.append(f"  - 文档ID: {doc_id_list[i]}")
-                    report.append(f"    文件名: {name_list[i]}")
-                    report.append(f"    创建时间: {date_list[i]}")
+                    report.append(f"  - 文档ID: {doc['doc_id']}")
+                    report.append(f"    文件名: {doc['name']}")
+                    report.append(f"    创建时间: {doc['date']}")
                     report.append(f"    处理状态: {status}")
-                    report.append(f"    处理进度: {process}%")
-                    report.append(f"    文件大小: {int(size):,} 字节")
+                    report.append(f"    处理进度: {doc['process']*100}%")
+                    report.append(f"    文件大小: {doc['size']:,} 字节")
         else:
             report.append("\n未发现重复文档！")
         

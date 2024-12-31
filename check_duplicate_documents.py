@@ -9,12 +9,7 @@ def main():
     print("正在检查重复文档...")
     report = cli.check_duplicates(kb_id)
     
-    # 将报告同时保存到文件
-    with open('duplicate_documents_report.txt', 'w', encoding='utf-8') as f:
-        f.write(report)
-    
     print(report)
-    print("\n报告已保存到 duplicate_documents_report.txt")
 
 
 if __name__ == "__main__":
