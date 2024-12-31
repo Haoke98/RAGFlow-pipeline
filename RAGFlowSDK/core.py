@@ -25,12 +25,38 @@ class RAGFlowCli:
         """初始化SQLite数据库"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS documents
-                    (doc_id TEXT PRIMARY KEY, 
-                     kb_id TEXT,
-                     name TEXT,
-                     file_hash TEXT,
-                     create_date TEXT)''')
+        
+        # 检查是否需要更新表结构
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
+        table_exists = c.fetchone() is not None
+        
+        if table_exists:
+            # 获取现有表的列信息
+            c.execute('PRAGMA table_info(documents)')
+            columns = {row[1] for row in c.fetchall()}
+            
+            # 如果是旧版表结构，则删除旧表
+            if 'update_date' not in columns:
+                c.execute('DROP TABLE documents')
+                table_exists = False
+        
+        if not table_exists:
+            c.execute('''CREATE TABLE documents
+                        (doc_id TEXT PRIMARY KEY, 
+                         kb_id TEXT,
+                         name TEXT,
+                         file_hash TEXT,
+                         create_date TEXT,
+                         status TEXT,           -- 文档处理状态
+                         process_msg TEXT,      -- 处理信息
+                         process TEXT,          -- 处理进度
+                         size INTEGER,          -- 文件大小
+                         source_type TEXT,      -- 来源类型
+                         chunk_num INTEGER,     -- 分块数量
+                         update_date TEXT)      -- 更新时间
+                         ''')
+            print("数据库表结构已更新")
+        
         conn.commit()
         conn.close()
 
@@ -72,7 +98,7 @@ class RAGFlowCli:
             return None
 
     def sync(self, kb_id: str):
-        """更新本地数据库中的文档哈希值"""
+        """更新本地数据库中的文档信息和哈希值"""
         docs = self.get_all_documents(kb_id)
         
         conn = sqlite3.connect(self.db_path)
@@ -80,17 +106,34 @@ class RAGFlowCli:
         
         for doc in docs:
             doc_id = doc.get('id')
-            # 检查是否已经有哈希值
-            c.execute('SELECT file_hash FROM documents WHERE doc_id = ?', (doc_id,))
-            if not c.fetchone():
+            # 检查是否需要更新文档信息
+            c.execute('SELECT update_date FROM documents WHERE doc_id = ?', (doc_id,))
+            result = c.fetchone()
+            doc_update_date = doc.get('update_date')
+            
+            if not result or result[0] != doc_update_date:
                 print(f"正在处理文档: {doc.get('name')}")
-                file_hash = self._download_and_hash(doc_id)
-                if file_hash:
+                # 计算文件哈希值（如果需要）
+                file_hash = None
+                if not result:  # 新文档才需要下载计算哈希值
+                    file_hash = self._download_and_hash(doc_id)
+                
+                if file_hash or result:  # 新文档有哈希值或是更新已有文档
                     c.execute('''INSERT OR REPLACE INTO documents 
-                                (doc_id, kb_id, name, file_hash, create_date)
-                                VALUES (?, ?, ?, ?, ?)''',
+                                (doc_id, kb_id, name, file_hash, create_date,
+                                 status, process_msg, process, size, source_type,
+                                 chunk_num, update_date)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                              (doc_id, kb_id, doc.get('name'), 
-                              file_hash, doc.get('create_date')))
+                              file_hash if file_hash else result[0],  # 保留原有哈希值
+                              doc.get('create_date'),
+                              str(doc.get('status')),
+                              doc.get('process_msg'),
+                              str(doc.get('process', 0)),
+                              doc.get('size'),
+                              doc.get('source_type'),
+                              doc.get('chunk_num'),
+                              doc_update_date))
                     conn.commit()
         
         conn.close()
@@ -260,9 +303,13 @@ class RAGFlowCli:
         
         # 查找具有相同哈希值的文档
         c.execute('''
-            SELECT file_hash, GROUP_CONCAT(name) as names, 
+            SELECT file_hash, 
+                   GROUP_CONCAT(name) as names, 
                    GROUP_CONCAT(doc_id) as doc_ids,
                    GROUP_CONCAT(create_date) as dates,
+                   GROUP_CONCAT(status) as statuses,
+                   GROUP_CONCAT(process) as processes,
+                   GROUP_CONCAT(size) as sizes,
                    COUNT(*) as count
             FROM documents 
             WHERE kb_id = ?
@@ -284,7 +331,7 @@ class RAGFlowCli:
         
         if duplicates:
             report.append("\n重复文档详情:")
-            for file_hash, names, doc_ids, dates, count in duplicates:
+            for file_hash, names, doc_ids, dates, statuses, processes, sizes, count in duplicates:
                 report.append(f"\n文件哈希值: {file_hash}")
                 report.append(f"重复数量: {count}")
                 
@@ -292,12 +339,27 @@ class RAGFlowCli:
                 name_list = names.split(',')
                 doc_id_list = doc_ids.split(',')
                 date_list = dates.split(',')
+                status_list = statuses.split(',')
+                process_list = processes.split(',')
+                size_list = sizes.split(',')
                 
                 report.append("重复实例:")
                 for i in range(count):
+                    status_map = {
+                        "0": "待处理",
+                        "1": "处理完成",
+                        "-1": "处理失败"
+                    }
+                    status = status_map.get(status_list[i], "未知状态")
+                    process = process_list[i]
+                    size = size_list[i]
+                    
                     report.append(f"  - 文档ID: {doc_id_list[i]}")
                     report.append(f"    文件名: {name_list[i]}")
                     report.append(f"    创建时间: {date_list[i]}")
+                    report.append(f"    处理状态: {status}")
+                    report.append(f"    处理进度: {process}%")
+                    report.append(f"    文件大小: {int(size):,} 字节")
         else:
             report.append("\n未发现重复文档！")
         
