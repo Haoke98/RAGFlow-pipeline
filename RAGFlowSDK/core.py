@@ -412,3 +412,146 @@ class RAGFlowCli:
         
         conn.close()
         return duplicate_groups
+
+    def delete_document(self, doc_id: str) -> bool:
+        """
+        删除指定的文档
+        :param doc_id: 文档ID
+        :return: 是否删除成功
+        """
+        try:
+            response = requests.post(
+                f"{self.base_url}/v1/document/rm",
+                headers=self.headers,
+                json={
+                    "doc_id": [doc_id]  # 接口要求的格式是文档ID列表
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('code') == 0 and result.get('data') is True:
+                    # 从本地数据库中也删除该文档
+                    conn = sqlite3.connect(self.db_path)
+                    c = conn.cursor()
+                    c.execute('DELETE FROM documents WHERE doc_id = ?', (doc_id,))
+                    conn.commit()
+                    conn.close()
+                    return True
+            return False
+        except Exception as e:
+            print(f"删除文档时发生错误: {str(e)}")
+            return False
+
+    def clean_duplicates(self, kb_id: str) -> str:
+        """
+        清理重复文档，保留解析进度最高的版本
+        :param kb_id: 知识库ID
+        :return: 清理报告
+        """
+        # 首先确保本地数据库是最新的
+        self.sync(kb_id)
+        
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # 查找重复文档组
+        c.execute('''
+            WITH duplicate_counts AS (
+                SELECT file_hash, COUNT(*) as count
+                FROM documents 
+                WHERE kb_id = ?
+                GROUP BY file_hash 
+                HAVING count > 1
+            )
+            SELECT 
+                d.file_hash,
+                GROUP_CONCAT(d.doc_id) as doc_ids,
+                GROUP_CONCAT(d.name) as names,
+                GROUP_CONCAT(d.process) as processes
+            FROM documents d
+            JOIN duplicate_counts dc ON d.file_hash = dc.file_hash
+            GROUP BY d.file_hash
+        ''', (kb_id,))
+        
+        duplicates = c.fetchall()
+        
+        # 清理统计
+        stats = {
+            "total_groups": len(duplicates),
+            "total_deleted": 0,
+            "failed_deletes": [],
+            "details": []
+        }
+        
+        for file_hash, doc_ids, names, processes in duplicates:
+            doc_id_list = doc_ids.split(',')
+            name_list = names.split(',')
+            process_list = [float(p or 0) for p in processes.split(',')]
+            
+            # 将文档信息组合成列表并按处理进度排序
+            docs = list(zip(doc_id_list, name_list, process_list))
+            docs.sort(key=lambda x: x[2], reverse=True)  # 按进度降序排序
+            
+            # 保留进度最高的文档，删除其他的
+            kept_doc = docs[0]
+            docs_to_delete = docs[1:]
+            
+            group_detail = {
+                "file_hash": file_hash,
+                "kept_doc": {
+                    "id": kept_doc[0],
+                    "name": kept_doc[1],
+                    "progress": kept_doc[2]
+                },
+                "deleted_docs": []
+            }
+            
+            for doc_id, name, progress in docs_to_delete:
+                if self.delete_document(doc_id):
+                    stats["total_deleted"] += 1
+                    group_detail["deleted_docs"].append({
+                        "id": doc_id,
+                        "name": name,
+                        "progress": progress,
+                        "status": "成功"
+                    })
+                else:
+                    stats["failed_deletes"].append(doc_id)
+                    group_detail["deleted_docs"].append({
+                        "id": doc_id,
+                        "name": name,
+                        "progress": progress,
+                        "status": "失败"
+                    })
+            
+            stats["details"].append(group_detail)
+        
+        conn.close()
+        
+        # 生成报告
+        report = []
+        report.append("重复文档清理报告")
+        report.append(f"重复文档组数: {stats['total_groups']}")
+        report.append(f"已删除文档数: {stats['total_deleted']}")
+        if stats["failed_deletes"]:
+            report.append(f"删除失败数: {len(stats['failed_deletes'])}")
+        
+        if stats["details"]:
+            report.append("\n清理详情:")
+            for detail in stats["details"]:
+                report.append(f"\n文件哈希值: {detail['file_hash']}")
+                report.append("保留的文档:")
+                report.append(f"  - ID: {detail['kept_doc']['id']}")
+                report.append(f"    文件名: {detail['kept_doc']['name']}")
+                report.append(f"    处理进度: {detail['kept_doc']['progress']*100}%")
+                
+                if detail["deleted_docs"]:
+                    report.append("删除的文档:")
+                    for doc in detail["deleted_docs"]:
+                        report.append(f"  - ID: {doc['id']}")
+                        report.append(f"    文件名: {doc['name']}")
+                        report.append(f"    处理进度: {doc['progress']*100}%")
+                        report.append(f"    状态: {doc['status']}")
+        
+        return "\n".join(report)
