@@ -245,3 +245,88 @@ class RAGFlowCli:
                 report += f"错误: {failed['error']}\n"
 
         return {"success": True, "message": report, "stats": stats}
+
+    def check_duplicates(self, kb_id: str) -> str:
+        """
+        检查知识库中的重复文档（基于文件哈希值）
+        :param kb_id: 知识库ID
+        :return: 重复文档报告
+        """
+        # 首先确保本地数据库是最新的
+        self.sync(kb_id)
+        
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # 查找具有相同哈希值的文档
+        c.execute('''
+            SELECT file_hash, GROUP_CONCAT(name) as names, 
+                   GROUP_CONCAT(doc_id) as doc_ids,
+                   GROUP_CONCAT(create_date) as dates,
+                   COUNT(*) as count
+            FROM documents 
+            WHERE kb_id = ?
+            GROUP BY file_hash 
+            HAVING count > 1
+        ''', (kb_id,))
+        
+        duplicates = c.fetchall()
+        
+        # 获取知识库中的总文档数
+        c.execute('SELECT COUNT(*) FROM documents WHERE kb_id = ?', (kb_id,))
+        total_docs = c.fetchone()[0]
+        
+        # 生成报告
+        report = []
+        report.append(f"知识库文档查重报告")
+        report.append(f"总文档数: {total_docs}")
+        report.append(f"发现重复文档组数: {len(duplicates)}")
+        
+        if duplicates:
+            report.append("\n重复文档详情:")
+            for file_hash, names, doc_ids, dates, count in duplicates:
+                report.append(f"\n文件哈希值: {file_hash}")
+                report.append(f"重复数量: {count}")
+                
+                # 将组合字符串分割成列表
+                name_list = names.split(',')
+                doc_id_list = doc_ids.split(',')
+                date_list = dates.split(',')
+                
+                report.append("重复实例:")
+                for i in range(count):
+                    report.append(f"  - 文档ID: {doc_id_list[i]}")
+                    report.append(f"    文件名: {name_list[i]}")
+                    report.append(f"    创建时间: {date_list[i]}")
+        else:
+            report.append("\n未发现重复文档！")
+        
+        conn.close()
+        return "\n".join(report)
+
+    def get_duplicate_groups(self, kb_id: str) -> list:
+        """
+        获取重复文档组（用于后续可能的删除操作）
+        :param kb_id: 知识库ID
+        :return: 重复文档组列表
+        """
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        c.execute('''
+            SELECT file_hash, GROUP_CONCAT(doc_id) as doc_ids
+            FROM documents 
+            WHERE kb_id = ?
+            GROUP BY file_hash 
+            HAVING COUNT(*) > 1
+        ''', (kb_id,))
+        
+        duplicate_groups = []
+        for file_hash, doc_ids in c.fetchall():
+            duplicate_groups.append({
+                'hash': file_hash,
+                'doc_ids': doc_ids.split(',')
+            })
+        
+        conn.close()
+        return duplicate_groups
