@@ -1,7 +1,10 @@
+import json
 import logging
 import os
 import hashlib
 import sqlite3
+import sys
+
 import requests
 from typing import Optional
 
@@ -14,7 +17,7 @@ class RAGFlowCli:
         # 初始化logger
         logger.init("RAGFlowCli")
         if auth_token is None:
-            _auth_token = os.environ["RAGFLOW_BASE_URL"]
+            _auth_token = os.environ["RAGFLOW_AUTH_TOKEN"]
         else:
             _auth_token = auth_token
         if base_url is None:
@@ -76,6 +79,57 @@ class RAGFlowCli:
         conn.commit()
         conn.close()
 
+    def __do_request__(self, method: str, url: str, **kwargs) -> dict:
+        """
+        统一处理HTTP请求
+
+        Args:
+            method: HTTP方法 ('GET', 'POST' 等)
+            url: 请求URL
+            **kwargs: 请求的其他参数(params, json, data, files等)
+
+        Returns:
+            dict: 响应结果
+        """
+        # 确保headers存在
+        if 'headers' not in kwargs:
+            kwargs['headers'] = self.headers
+
+        response = requests.request(method, url, **kwargs)
+
+        if response.status_code == 200:
+            result = response.json()
+            if result['code'] == 401:
+                logging.error(result["message"] + f"\nHeaders: {response.request.headers}")
+                sys.exit(-1)
+            elif result['code'] != 0:
+                raise Exception(result['message'])
+            return {
+                'success': True,
+                'data': result,
+                'status_code': response.status_code
+            }
+        else:
+            logging.error(
+                f"请求失败，状态码: {response.status_code}\n"
+                f"{method}: {url}\n"
+                f"Headers: {kwargs.get('headers')}\n"
+                f"Body: {kwargs.get('json') or kwargs.get('data')}"
+            )
+            return {
+                'success': False,
+                'error': f'HTTP错误: {response.status_code}',
+                'status_code': response.status_code
+            }
+        # except Exception as e:
+        #     error_msg = f"请求发生错误: {str(e)}"
+        #     logging.error(error_msg)
+        #     return {
+        #         'success': False,
+        #         'error': error_msg,
+        #         'status_code': None
+        #     }
+
     def _calculate_file_hash(self, file_path: str) -> str:
         """计算文件的SHA256哈希值"""
         sha256_hash = hashlib.sha256()
@@ -87,20 +141,20 @@ class RAGFlowCli:
     def _download_and_hash(self, doc_id: str) -> Optional[str]:
         """下载文档并计算哈希值"""
         try:
-            response = requests.get(
+            result = self.__do_request__(
+                'GET',
                 f"{self.download_url}/{doc_id}",
-                headers=self.headers,
                 stream=True
             )
 
-            if response.status_code == 200:
+            if result['success']:
                 # 创建临时文件
                 temp_path = f"temp_{doc_id}.pdf"
                 sha256_hash = hashlib.sha256()
 
                 # 边下载边计算哈希值
                 with open(temp_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    for chunk in result['data'].iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             sha256_hash.update(chunk)
@@ -184,30 +238,25 @@ class RAGFlowCli:
         while True:
             params = {
                 'kb_id': kb_id,
-                'page_size': 100,  # 每页获取100条记录
+                'page_size': 100,
                 'page': page
             }
 
-            response = requests.get(
-                self.search_url,
-                headers=self.headers,
-                params=params
-            )
+            result = self.__do_request__('GET', self.search_url, params=params)
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('code') == 0:
-                    docs = result.get('data', {}).get('docs', [])
+            if result['success']:
+                response_data = result['data']
+                if response_data.get('code') == 0:
+                    docs = response_data.get('data', {}).get('docs', [])
                     if not docs:  # 如果没有更多文档了
                         break
                     all_docs.extend(docs)
                     page += 1
                 else:
-                    print(f"获取文档列表失败: {result.get('message')}")
+                    print(f"获取文档列表失败: {response_data.get('message')}")
                     break
             else:
-                logging.error(
-                    f"请求失败，状态码: {response.status_code}\n" + f"{response.request.method}: {response.request.url}\n" + f"{response.request.headers}\n" + f"{response.request.body}")
+                print(f"请求失败: {result.get('error')}")
                 break
 
         return all_docs
@@ -217,7 +266,7 @@ class RAGFlowCli:
         上传文件
         :param kb_id: 知识库ID
         :param file_path: 文件路径
-        :return:
+        :return: dict
         """
         try:
             if not os.path.exists(file_path):
@@ -249,25 +298,22 @@ class RAGFlowCli:
                 'file': (real_filename, open(file_path, 'rb'), 'application/pdf')
             }
 
-            response = requests.post(
+            result = self.__do_request__(
+                'POST',
                 self.upload_url,
-                headers=self.headers,
-                data={
-                    "kb_id": kb_id,
-                },
+                data={"kb_id": kb_id},
                 files=files
             )
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('code') == 9 and result.get('data') is True:
-                    # 上传成功后，立即同步一次数据库以获取新文档信息
+            if result['success']:
+                response_data = result['data']
+                if response_data.get('code') == 9 and response_data.get('data') is True:
                     self.sync(kb_id)
                     return {"success": True, "message": "文件上传成功"}
                 else:
-                    return {"success": False, "message": f"上传失败: {result.get('message')}"}
+                    return {"success": False, "message": f"上传失败: {response_data.get('message')}"}
             else:
-                return {"success": False, "message": f"上传失败，状态码: {response.status_code}"}
+                return {"success": False, "message": f"上传失败: {result.get('error')}"}
 
         except Exception as e:
             return {"success": False, "message": f"上传过程发生错误: {str(e)}"}
@@ -452,20 +498,18 @@ class RAGFlowCli:
         """
         删除指定的文档
         :param doc_id: 文档ID
-        :return: 是否删除成功
+        :return: bool
         """
         try:
-            response = requests.post(
+            result = self.__do_request__(
+                'POST',
                 f"{self.base_url}/v1/document/rm",
-                headers=self.headers,
-                json={
-                    "doc_id": [doc_id]  # 接口要求的格式是文档ID列表
-                }
+                json={"doc_id": [doc_id]}
             )
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('code') == 0 and result.get('data') is True:
+            if result['success']:
+                response_data = result['data']
+                if response_data.get('code') == 0 and response_data.get('data') is True:
                     # 从本地数据库中也删除该文档
                     conn = sqlite3.connect(self.db_path)
                     c = conn.cursor()
