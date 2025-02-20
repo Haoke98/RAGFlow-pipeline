@@ -98,17 +98,26 @@ class RAGFlowCli:
         response = requests.request(method, url, **kwargs)
 
         if response.status_code == 200:
-            result = response.json()
-            if result['code'] == 401:
-                logging.error(result["message"] + f"\nHeaders: {response.request.headers}")
-                sys.exit(-1)
-            elif result['code'] != 0:
-                raise Exception(result['message'])
-            return {
-                'success': True,
-                'data': result,
-                'status_code': response.status_code
-            }
+            content_type = response.headers.get('content-type')
+            if content_type == 'application/json':
+                result = response.json()
+                if result['code'] == 401:
+                    logging.error(result["message"] + f"\nHeaders: {response.request.headers}")
+                    sys.exit(-1)
+                elif result['code'] != 0:
+                    raise Exception(result['message'])
+                return {
+                    'success': True,
+                    'data': result,
+                    'status_code': response.status_code
+                }
+            else:
+                return {
+                    'success': True,
+                    'data': response,
+                    'status_code': response.status_code
+                }
+
         else:
             logging.error(
                 f"请求失败，状态码: {response.status_code}\n"
@@ -164,7 +173,7 @@ class RAGFlowCli:
                 return sha256_hash.hexdigest()
             return None
         except Exception as e:
-            print(f"下载文件时发生错误: {str(e)}")
+            logging.error(f"下载文件时发生错误: {str(e)}", exc_info=True)
             return None
 
     def sync(self, kb_id: str):
@@ -173,8 +182,10 @@ class RAGFlowCli:
 
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+        total = len(docs)
 
-        for doc in docs:
+        for i,doc in enumerate(docs,1):
+            p = i/total*100
             doc_id = doc.get('id')
             # 检查是否需要更新文档信息
             c.execute('SELECT update_date FROM documents WHERE doc_id = ?', (doc_id,))
@@ -182,7 +193,7 @@ class RAGFlowCli:
             doc_update_date = doc.get('update_date')
 
             if not result or result[0] != doc_update_date:
-                print(f"正在处理文档: {doc.get('name')}")
+                logging.info(f"{p:.2f}% ({i}/{total}) 正在处理文档: {doc.get('name')}")
                 # 计算文件哈希值（如果需要）
                 file_hash = None
                 if not result:  # 新文档才需要下载计算哈希值
@@ -334,25 +345,28 @@ class RAGFlowCli:
             "failed": 0,
             "failed_files": []
         }
-
+        logging.info("正在扫描目录.....")
+        pending_files = []
         # 遍历目录下的所有文件
         for root, dirs, files in os.walk(directory_path):
             for file in files:
                 if file.lower().endswith('.pdf'):
-                    file_path = os.path.join(root, file)
-                    stats["total"] += 1
-
-                    print(f"正在上传: {file}")
-                    result = self.upload_file(kb_id, file_path)
-
-                    if result["success"]:
-                        stats["success"] += 1
-                    else:
-                        stats["failed"] += 1
-                        stats["failed_files"].append({
-                            "file": file_path,
-                            "error": result["message"]
-                        })
+                    pending_files.append(os.path.join(root, file))
+        total = len(pending_files)
+        logging.info(f"扫描已完成：{total}")
+        for i, file_path in enumerate(pending_files, start=1):
+            p = i / total * 100
+            stats["total"] += 1
+            logging.info(f"{p:.2f}%({i}/{total}) 正在上传: {file_path}")
+            result = self.upload_file(kb_id, file_path)
+            if result["success"]:
+                stats["success"] += 1
+            else:
+                stats["failed"] += 1
+                stats["failed_files"].append({
+                    "file": file_path,
+                    "error": result["message"]
+                })
 
         # 生成上传报告
         report = (
