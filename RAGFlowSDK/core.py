@@ -117,7 +117,11 @@ class RAGFlowCli:
                     'data': response,
                     'status_code': response.status_code
                 }
-
+        elif response.status_code==413:
+            logging.error(f"请求体太大了，状态码: {response.status_code}  估计是上传的文件太大了\n"
+                f"{method}: {url}\n"
+                f"Headers: {kwargs.get('headers')}\n"
+                f"Body: {kwargs.get('json') or kwargs.get('data')}")
         else:
             logging.error(
                 f"请求失败，状态码: {response.status_code}\n"
