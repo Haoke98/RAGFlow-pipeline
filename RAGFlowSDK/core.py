@@ -5,11 +5,14 @@ import sqlite3
 import requests
 from typing import Optional
 
+from RAGFlowSDK import logger
 from RAGFlowSDK.constants import APP_CONFIG_DIR
 
 
 class RAGFlowCli:
-    def __init__(self, auth_token: str=None, base_url: str = None, db_path: str = "documents.db"):
+    def __init__(self, auth_token: str = None, base_url: str = None, db_path: str = "documents.db"):
+        # 初始化logger
+        logger.init("RAGFlowCli")
         if auth_token is None:
             _auth_token = os.environ["RAGFLOW_BASE_URL"]
         else:
@@ -27,6 +30,7 @@ class RAGFlowCli:
             'Origin': self.base_url,
             'Connection': 'keep-alive',
             'Authorization': _auth_token,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0"
         }
         if not os.path.exists(APP_CONFIG_DIR):
             os.makedirs(APP_CONFIG_DIR)
@@ -202,7 +206,8 @@ class RAGFlowCli:
                     print(f"获取文档列表失败: {result.get('message')}")
                     break
             else:
-                print(f"请求失败，状态码: {response.status_code}")
+                logging.error(
+                    f"请求失败，状态码: {response.status_code}\n" + f"{response.request.method}: {response.request.url}\n" + f"{response.request.headers}\n" + f"{response.request.body}")
                 break
 
         return all_docs
