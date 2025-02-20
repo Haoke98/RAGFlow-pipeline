@@ -117,11 +117,11 @@ class RAGFlowCli:
                     'data': response,
                     'status_code': response.status_code
                 }
-        elif response.status_code==413:
+        elif response.status_code == 413:
             logging.error(f"请求体太大了，状态码: {response.status_code}  估计是上传的文件太大了\n"
-                f"{method}: {url}\n"
-                f"Headers: {kwargs.get('headers')}\n"
-                f"Body: {kwargs.get('json') or kwargs.get('data')}")
+                          f"{method}: {url}\n"
+                          f"Headers: {kwargs.get('headers')}\n"
+                          f"Body: {kwargs.get('json') or kwargs.get('data')}")
         else:
             logging.error(
                 f"请求失败，状态码: {response.status_code}\n"
@@ -188,8 +188,8 @@ class RAGFlowCli:
         c = conn.cursor()
         total = len(docs)
 
-        for i,doc in enumerate(docs,1):
-            p = i/total*100
+        for i, doc in enumerate(docs, 1):
+            p = i / total * 100
             doc_id = doc.get('id')
             # 检查是否需要更新文档信息
             c.execute('SELECT update_date FROM documents WHERE doc_id = ?', (doc_id,))
@@ -652,3 +652,38 @@ class RAGFlowCli:
                         report.append(f"    状态: {doc['status']}")
 
         return "\n".join(report)
+
+    def run(self, doc_ids: list[str], run: int) -> dict:
+        """
+        触发文档解析操作
+        
+        Args:
+            doc_ids: 文档ID列表
+            run: 操作编号， 1代表解析
+            
+        Returns:
+            dict: 包含操作结果的字典
+        """
+        try:
+            payload = {
+                "doc_ids": doc_ids,
+                "run": run
+            }
+
+            result = self.__do_request__(
+                'POST',
+                f"{self.base_url}/v1/document/run",
+                json=payload
+            )
+
+            if result['success']:
+                response_data = result['data']
+                if response_data.get('code') == 0:
+                    return {"success": True, "message": "文档解析任务已触发"}
+                else:
+                    return {"success": False, "message": f"触发解析失败: {response_data.get('message')}"}
+            else:
+                return {"success": False, "message": f"请求失败: {result.get('error')}"}
+
+        except Exception as e:
+            return {"success": False, "message": f"触发解析时发生错误: {str(e)}"}

@@ -35,8 +35,8 @@ def get_log_directory():
 def init(filename, file_level=logging.DEBUG, console_level=logging.INFO):
     # 控制台输出不同级别日志颜色设置
     color_config = {
-        'DEBUG': 'cyan',
-        'INFO': 'green',
+        'DEBUG': 'green',
+        'INFO': 'bold_green',
         'WARNING': 'yellow',
         'ERROR': 'red',
         'CRITICAL': 'purple',
