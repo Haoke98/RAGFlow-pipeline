@@ -1,3 +1,4 @@
+import logging
 import os
 import hashlib
 import sqlite3
@@ -8,8 +9,15 @@ from RAGFlowSDK.constants import APP_CONFIG_DIR
 
 
 class RAGFlowCli:
-    def __init__(self, auth_token: str, base_url: str = "http://172.30.58.252", db_path: str = "documents.db"):
-        self.base_url = base_url
+    def __init__(self, auth_token: str=None, base_url: str = None, db_path: str = "documents.db"):
+        if auth_token is None:
+            _auth_token = os.environ["RAGFLOW_BASE_URL"]
+        else:
+            _auth_token = auth_token
+        if base_url is None:
+            self.base_url = os.environ["RAGFLOW_BASE_URL"]
+        else:
+            self.base_url = base_url
         self.upload_url = f"{self.base_url}/v1/document/upload"
         self.search_url = f"{self.base_url}/v1/document/list"
         self.download_url = f"{self.base_url}/v1/document/get"
@@ -18,7 +26,7 @@ class RAGFlowCli:
             'Accept-Language': 'zh-CN',
             'Origin': self.base_url,
             'Connection': 'keep-alive',
-            'Authorization': auth_token,
+            'Authorization': _auth_token,
         }
         if not os.path.exists(APP_CONFIG_DIR):
             os.makedirs(APP_CONFIG_DIR)
