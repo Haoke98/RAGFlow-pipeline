@@ -19,20 +19,20 @@ def main():
         p = i / total * 100
         doc_id = doc['id']
         prefix = f"{p:.2f}%({i}/{total}) {doc_id} {doc['name']} "
-        # 0: 没在执行， 1：正在执行， 2： 失败， 3：成功
+        # 0: 没在执行， 1：正在执行， 2： ? ， 3：成功  4: FAILED
         run_status = doc['run']
         if run_status == '0':
             logging.critical(prefix + "(还未解析)")
-            # TODO：触发解析
             bulk_buffer.append(doc_id)
         elif run_status == '1':
             logging.warning(prefix + f"(正在解析：{doc['progress'] * 100:.2f} %)")
-        elif run_status == '2':
-            logging.error(prefix + "(失败了，需要重新解析)")
-            # TODO：触发解析
-            bulk_buffer.append(doc_id)
         elif run_status == '3':
             logging.info(prefix + "(解析已完成)")
+        elif run_status == '4':
+            logging.error(prefix + "(失败了，需要重新解析)")
+            bulk_buffer.append(doc_id)
+        else:
+            raise Exception("Unknown run status")
         if len(bulk_buffer) > 10:
             cli.run(bulk_buffer, 1)
             logging.debug("发起了批量解析请求")
